@@ -1,0 +1,346 @@
+---
+title: 'Projet : méthodes non paramétriques en analyse de survie'
+author: "OUOROU_HOUSSEIN"
+date: "2022-11-01"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r r setup, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(survminer)
+library(survival)
+```
+
+## Exercice 1: Implémentation de l'estimation de Kaplan Meyer
+
+
+#### 1- Une fonction prenant en argument un vecteur de dates (non ordonnées), un vecteur de status (0 ou 1) et qui renvoie l’estimateur de Kaplan Meyer de la courbe de survie
+
+```{r}
+estim_skm <- function(dates, status, show.plot = FALSE){
+  n = length(dates)
+  don <- data.frame(dates, status)
+  don <- don %>% 
+    arrange(dates) 
+  
+  date_unique = unique(don$dates)
+  if(length(date_unique) == n ){ ## Estimateur en cas de dates non répétées
+    ## Le nombre de restant à chaque dates
+    ## N'observant qu'une occurrence (évènement ou censure) par date alors,
+    ## Le nombre de personnes restant à une date correspond
+    ## au nombre de personne restant à la date précédente auquel on retranche 1 
+    r = n:1 
+    d = don$status
+    res = list(xx = c(0,don$dates), 
+                     yy =  c(1,cumprod(1 - d/r)))
+  }else{
+    
+    effectif = don %>% 
+      ## On essai de calculer le nombre de décès et de censure par dates en cas de répétitions
+      group_by(dates) %>%  
+      summarise(
+        ## le nombre de décès pour chaque dates
+        d = sum(status), 
+        ## le nombre de censure correspondant au nombre de dates moins le nombre de décès calculé dans la ligne plus haut
+        c = n() - d 
+        )
+    ## Calcul du vecteur R
+    ## Pour chaque date on calcul les décès et censure survenue jusqu'à cette date
+    ## on obtient en faisant cumsum de la somme de d et c
+    ## pour obtenir r on fais n moins le résultats précédents
+    `d+c` = cumsum(effectif$d + effectif$c)
+    # on retire la dernière valeur car elle correspond à n où tout le monde est mort ou censure
+    `d+c` = head(`d+c`, -1)  
+    r = c(n, n - `d+c`) 
+    
+    res = list(xx = c(0,date_unique), yy = c(1, cumprod(1 - effectif$d/r)))
+    
+  }
+  if(show.plot == TRUE){
+    print(
+      ggplot() +
+      geom_step(aes(x = res$xx, y = res$yy), lwd = 0.6) +
+      theme_light() +
+      ggtitle("Estimation de la courbe de survie de Kaplan Meyer")
+    )
+
+      
+    return(res)
+    
+  }else{
+    return(res)
+  }
+}
+```
+
+#### 2- Test de la fonction `estim_skm`
+
+On simule les données selon une loi binomiale de paramètre `(20, 0.5)` pour une taille d'échantillon `n = 10^6` 
+
+### Simulation
+
+```{r}
+
+
+n = 10^6
+ttilde = rbinom(n, 20, 0.5)
+
+c = rbinom(n, 20, 0.5)
+
+status = ifelse(ttilde <= c, 1, 0)
+
+dates = pmin(ttilde, c)
+
+```
+
+### Estimation de la survie pour les données simulées et comparaisons avec la survie théorique
+
+```{r}
+skm = estim_skm(dates, status, show.plot = FALSE)
+
+abs = seq(0, max(dates), length.out = 123)
+
+true_survie = c(1, pbinom(abs[2:length(abs)], 20, 0.5, lower.tail = FALSE))
+
+colors = c("VRAIE SURVIE" = "black", "KAPLAN MEYER" = "red")
+  ggplot() +
+  geom_step(aes(x = skm$xx, y = skm$yy, color = "KAPLAN MEYER"), lwd = 0.6) +
+  geom_line(aes(x = abs, y = true_survie,color = "VRAIE SURVIE"), lwd = 0.6) +
+  theme_light() +
+  ggtitle("Estimation de la courbe de survie de Kaplan Meyer") +
+    xlab("dates") + ylab("skm")+
+    scale_color_manual(values = colors) + theme(
+      legend.title = element_blank(),
+      legend.position = "top"
+    )
+
+```
+
+
+On remarque que l'estimation de la survie de Kaplan Meyer est assez correcte et proche de la vraie survie théorique.
+
+
+### 3- Utilisation des données diabetics
+
+```{r}
+data("diabetic")
+
+## les deux vecteurs pour l'utilisation de notre fonction
+dates = diabetic$time 
+status = diabetic$status
+
+## Création d'un objet survie
+objet_surv = Surv(dates, status )
+
+```
+
+Vérifions que notre estimateur est le même que celui du package `survival`
+```{r}
+## estimation de la survie via notre fonction
+res = estim_skm(diabetic$time, diabetic$status)
+res = list2DF(res) ## transformation de la liste rendu par la fonction en dataframe
+head(res) 
+```
+
+```{r}
+## estimation de la survie avec le package "survival"
+res_survival <- survfit(objet_surv~1, data = diabetic) %>% 
+  summary()
+```
+
+Après avoir explorer la sortie de l'estimation du package survival on a remarqué que la sortie ne comprenait pas la survie à la date 0 et aussi que si lors du passage d'une date à l'autre la survie ne changeait pas, le résultat ne répétait pas l'estimation. Ce qui n'est pas le cas pour notre fonction. On arrange ça en retirant les survies qui se répète (ne pause aucun problème avec notre fonction continue par morceaux)
+
+```{r}
+res = res %>% distinct(yy, .keep_all = TRUE)
+
+## différence des deux estimations
+mean(res$yy[-1] -res_survival$surv ) #### on retire le premier élément qui correspond à la date 0
+```
+
+La différence est quasiment inexistante. 
+```{r}
+head(data.frame(res,res_from_surv = c(1,res_survival$surv )))
+```
+
+On remarque que les deux estimations sont identiquess à 7 chiffres près et que la différence est du à un problème de stockage de décimal dans les deux calculs.
+On le confirme grâce à ce graphe où l'on superpose les deux estimateur sur le même graphe
+
+```{r}
+colors = c("KM by estim_km" = "black", "KM by survival" = "red") # Pour la légende
+ggplot() +
+  geom_step(aes(x = res$xx, y = res$yy, color = "KM by estim_km")) +
+  geom_point(aes(x = c(0,res_survival$time),  y = c(1,res_survival$surv), color = "KM by survival")) +
+  theme_light() +
+  ggtitle("Survival vs estim_km") +
+    xlab("dates") + ylab("skm")+
+  scale_color_manual(values = colors) + theme(
+      legend.title = element_blank(),
+      legend.position = "top"
+    )+
+  theme(
+      legend.title = element_blank(),
+      legend.position = "top",
+      plot.title = element_text(hjust = 0.5)
+    )
+
+```
+
+
+Les deux estimateurs sont identique comme le confirme ce graphique 
+
+## Exercice 2
+
+```{r}
+head(diabetic)
+```
+
+Les variable catégorielles du jeu de données sont:
+
+- `laser` : type de laser avec deux modalités
+- `eye` : l’œil concerné avec deux modalités
+- `trt` : variable binaire (traité ou non)
+- `risk`: variable à 7 modalité de 6 à 12
+
+## 2 - Etude séparer de l'inflence de chacune des covariable
+
+- **Laser**
+```{r}
+res = survfit(Surv(time, status)~ laser, data = diabetic) 
+ggsurvplot(res, conf.int = TRUE)
+```
+
+
+On remarque à travers ce graphique que les courbes de survies des deux groupes ne se distingue pas tellement. Il en est de même pour les intervalles de confiances qui s'entremêlent. Dans ces conditions on ne peut pas conclure à une survie significativement différente. Le traitement au laser xenon ne permet d'avoir une grande durée de rémission comparativement au traitement au laser argon.
+
+- **Eye**
+
+```{r}
+ res = survfit(Surv(time, status)~ eye, data = diabetic) 
+  ggsurvplot(res, conf.int = TRUE)
+```
+
+
+La présentation des deux courbes de survie est similaire au premier cas avec la variable laser. L'oeil gauche ne semble pas présenter une durée de rémission significativement différent de l'oeil droit.
+
+- trt
+
+```{r}
+res = survfit(Surv(time, status)~ trt, data = diabetic) 
+  ggsurvplot(res, conf.int = TRUE)
+```
+
+
+Cepdant quand on s'intéresse à la variable qui rensigne si l'oeil est traité ou pas, on remarque une survie assez différencié. Les deux intervalles de confiances sont disjoint ce qui nous permet de dire que l'une est significativement différente de l'autre. D'après le graphique, la courbe de survie des yeux traités est au dessus de celle des yeux non traités. les intervalles de confiances étant disjoints, on peut affirmer que la durée de rémission d'un oeil traité est significativement plus grande que celle d'un oeil non traité.
+
+- Risk
+
+```{r}
+  res = survfit(Surv(time, status)~ risk, data = diabetic) 
+  ggsurvplot(res, conf.int = TRUE)
+```
+
+Ce graphique n'est pas très lisible vu le nombre de modalités de la variable. On décide donc de regrouper les modalités pour faciliter l'interprétation.
+
+```{r}
+table(diabetic$risk)
+```
+Pour équilibrer les effectif on regroupera les modalité 6 à 9 ensemble et une autre classe pour les risques de 10 à 12.
+
+```{r}
+diabetic = diabetic %>% 
+  mutate(risk_rec = case_when(
+    risk <= 9 ~ "6-9",
+    risk > 9 ~ "> 9",
+    TRUE ~ as.character(risk)
+  ))
+survfit(Surv(time, status)~ risk_rec, data = diabetic) %>% 
+  ggsurvplot(conf.int = TRUE)
+```
+
+
+Ce graphique est beaucoup plus lisible et très informatif. On remarque que les patients (yeux) de stade élevé (10 et plus) ont une courbe de survie en dessous de celle des patients à un stade inférieur ou égale à 9. Les intervalles de confiance étant disjoint alors la durée de rémission des patients de stades supérieur à 9 est significativement plus petite que celle des patients de stade inférieur ou égale à 9.
+
+## 3- Une estimation de la probabilité de survie au dela de 22 mois  et intervalle de confiance
+```{r}
+## estimation de la survie
+
+res_tot = survfit(Surv(time, status)~1, data = diabetic)  
+summary(res_tot, times = 22)
+
+```
+
+
+La probabilité de survivre au dela de 22 mois vaut 0.729 $P(T > 22) = 0.729$. Toute chose égale par ailleurs, au sein des patients d'un notre jeu de données, la probabilité qu'un oeil ait une durée de rémission supérieur à 22 mois vaut 0.729. 
+
+### Intervalle de confiance
+ Pour un intervalle de niveau 95%, le quantile de la loi normale ($1 - \frac{\alpha}{2} = \text{2.5%}$) vaut 1.96. On construit donc un intervalle de confiance grâce aux proprietés de l'estimateur de KM qui convergent en loi vers une loi normale pour n grand.
+```{r}
+c(lower = 0.7292101 - 1.96*0.02283799,
+  upper = 0.7292101 + 1.96*0.02283799)
+
+
+```
+
+
+On remarque que 0 n'est pas dans l'intervalle de confiance et donc cette probabilité est significativement différente de 0 avec 95% de niveau de confiance.
+
+###### 4- Une estimation de la probabilité de survie au dela de 22 mois  et intervalle de confiance en fonction du traitement
+
+```{r}
+res_trt = survfit(Surv(time, status)~trt, data = diabetic, conf.type = "plain")  
+summary(res_trt, times = 22)
+```
+
+
+Pour les yeux n'ayant pas reçu de traitement la probabilité d'avoir une durée de rémission supérieur à 22 mois vaut 0.64, toute chose égale par ailleurs.
+Cependant pour les yeux traités, la probabilité d'avoir une durée de rémission supérieur à 22 vaut 0.80. 
+On remarque que cette probabilité est plus grande que celle des yeux non traités. Ce qui nous permet à prime abord de penser que le traitement permettait d'avoir une survie assez grande comparativement aux non traités. Mais on confirme cela en regardant les intervalles de confiance. (cette fois on le récupère directement dans la sortie de l'estimation).
+On voit que la borne supérieur de l'intervalle de confiance pour $P(T>22 | trt = 0)$ est de 0.71 qui est inférieur à la borne inférieur de  $P(T>22 | trt = 1)$. Les deux intervalles sont disjoint. Ce qui nous permet de confirmer que la probabilité d'avoir une durée de rémission supérieur supérieure à 22 mois pour les yeux traités est significativement plus grande que celle des yeux non traités. Le traitement aurait donc un effet positif.
+
+## 5 - Une estimation du quantile 25% de la durée de survie
+
+```{r}
+quantile(res_tot, probs = 0.25)$quantile
+```
+
+Le temps $t_{25}$ pour lequel les patients deviennent aveugle avant $t_{25}$ vaut 19.4. Autrement dit, la durée de rémission de 25% des patients est plus petite que 19.4.
+On s'intéresse maintenant aux intervalles de confiance
+
+```{r}
+quantile(res_tot, probs = 0.25)
+```
+
+Avec un niveau de confiance de 95%, le temps de survie de 25% des patients est plus petite qu'une date $t_{25}$ comprise entre 13.97 et 26.17 mois
+
+## 6- Comparaison du quantile à 25% de la survie dans les deux groupes (traités et non traités)
+
+```{r}
+quantile(res_trt, probs = 0.25)
+```
+
+D'abord, 25% du groupe non traités devient aveugle avant 13,83 mois tandis que pour le groupe traités, 25% deviennent aveugle avant 34.57 mois. Autrement dit, déjà à 13,83 mois, 1/4 du groupe traité devient aveugle, alors qu'il faut aller jusqu'a 34 mois avant de perdre 1/4 du groupe traités.  La durée de rémission est en moyenne plus grande pour les yeux traités. En regardant les intervalles de confiance, on remarque qu'ils sont disjoint, car la borne supérieure pour les patients non traités (19 mois) est plus petite que la borne inférieur des patients traités. Donc pour un niveau de confiance de 95%, $t_{25}$ pour le goupe ayant reçu un traitement est significativement plus grand que $t_{25}$ du groupe non traité.
+
+## 7- COmparaison de l'estimateur de Kaplan Meyer à celui de Harrington- Fleming.
+
+$$\hat{S}_{HF} = e^{-\hat{H}_{NA}}$$ 
+avec $\hat{H}_{NA}$ correspondant a l'estimation du risque cumulé de Nelson Aalen
+
+```{r}
+HF = exp(-res_tot$cumhaz)
+
+plot(res_tot, conf.int = FALSE, lwd = 2, main  = "Kaplan Meyer VS Harrignton Fleming", ylim = c(0.5, 1))
+points(x = res_tot$time, y = HF, col = 2)
+legend("topright", col = c(1, 2), lty = 1, pch = 1, legend = c("KM", "HF"))
+```
+
+
+Les deux estimateurs sont quasiment identique on le confirme avec l'histogramme des erreurs ci dessous
+
+```{r}
+hist(res_tot$surv - HF)
+```
+
+Cet histogramme nous apporte une information supplémentaire. On remarque que toute les valeurs sont plus petites que 0. Ainsi, l'estimateur de kaplan Meyer est légèrement supérieur à celui de Harrington Flemming. 
